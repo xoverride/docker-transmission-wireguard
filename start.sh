@@ -49,6 +49,7 @@ sysctl -w net.ipv6.conf.all.disable_ipv6=1
 # Create a "physical" network namespace and move our eth0 there
 ip netns ls
 ip netns add physical
+ip netns exec physical sysctl -w net.ipv6.conf.all.disable_ipv6=1
 ip link set eth0 netns physical
 
 # Restore IP and route configuration for the default interface (needed for both paths)
@@ -83,6 +84,69 @@ setup_veth() {
   # Start the veth interfaces
   ip link set veth1 up
   ip -n physical link set veth2 up
+}
+
+setup_killswitch() {
+  # Kill switch for default namespace: block everything except wg0 and veth1
+  echo "Setting up iptables kill switch in default namespace"
+
+  iptables -P OUTPUT DROP
+  iptables -P INPUT DROP
+  iptables -P FORWARD DROP
+
+  # Allow loopback
+  iptables -A OUTPUT -o lo -j ACCEPT
+  iptables -A INPUT -i lo -j ACCEPT
+
+  # Allow all traffic through WireGuard tunnel
+  iptables -A OUTPUT -o wg0 -j ACCEPT
+  iptables -A INPUT -i wg0 -j ACCEPT
+
+  # Allow veth1 traffic (nginx reverse proxy bridge)
+  iptables -A OUTPUT -o veth1 -d ${VETH_IP_2}/31 -j ACCEPT
+  iptables -A INPUT -i veth1 -s ${VETH_IP_2}/31 -j ACCEPT
+
+  # Allow established/related connections
+  iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+}
+
+setup_physical_firewall() {
+  # Firewall for physical namespace: restrict eth0 to WireGuard endpoint + nginx only
+  echo "Setting up iptables firewall in physical namespace"
+
+  # Get endpoint info from wg0 (works for both kernel and userspace paths)
+  local wg_endpoint wg_port
+  wg_endpoint=$(wg show wg0 endpoints | awk '{print $2}' | cut -d: -f1)
+  wg_port=$(wg show wg0 endpoints | awk '{print $2}' | cut -d: -f2)
+  echo "WireGuard endpoint: ${wg_endpoint}:${wg_port}"
+
+  ip netns exec physical iptables -P OUTPUT DROP
+  ip netns exec physical iptables -P INPUT DROP
+  ip netns exec physical iptables -P FORWARD DROP
+
+  # Allow loopback
+  ip netns exec physical iptables -A OUTPUT -o lo -j ACCEPT
+  ip netns exec physical iptables -A INPUT -i lo -j ACCEPT
+
+  # Allow incoming connections to nginx on eth0
+  ip netns exec physical iptables -A INPUT -i "$INT" -p tcp --dport 9091 -j ACCEPT
+
+  # Allow WireGuard UDP to/from endpoint on eth0
+  ip netns exec physical iptables -A OUTPUT -o "$INT" -d "$wg_endpoint" -p udp --dport "$wg_port" -j ACCEPT
+  ip netns exec physical iptables -A INPUT -i "$INT" -s "$wg_endpoint" -p udp --sport "$wg_port" -j ACCEPT
+
+  # Allow veth2 traffic (bridge to default namespace)
+  ip netns exec physical iptables -A INPUT -i veth2 -s ${VETH_IP_1}/31 -j ACCEPT
+  ip netns exec physical iptables -A OUTPUT -o veth2 -d ${VETH_IP_1}/31 -j ACCEPT
+
+  # Allow forwarding through veth2/eth0 (needed for wireguard-go path)
+  ip netns exec physical iptables -A FORWARD -i veth2 -o "$INT" -j ACCEPT
+  ip netns exec physical iptables -A FORWARD -i "$INT" -o veth2 -j ACCEPT
+
+  # Allow established/related
+  ip netns exec physical iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  ip netns exec physical iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 }
 
 if [ "$USE_USERSPACE" = "true" ]; then
@@ -157,6 +221,10 @@ curl --silent -w "\n" ipecho.net/plain
 if [ "$VETH_DONE" = "false" ]; then
   setup_veth
 fi
+
+# Set up iptables kill switch to prevent leaks if WireGuard tunnel drops
+setup_killswitch
+setup_physical_firewall
 
 # Generate runtime nginx config with correct veth IP and start reverse proxy
 NGINX_RUNTIME_CONF=$(mktemp)
