@@ -18,6 +18,14 @@ RUN apk --no-cache add curl jq \
     && wget -qO- https://github.com/6c65726f79/Transmissionic/releases/download/v1.8.0/Transmissionic-webui-v1.8.0.zip | unzip -q - \
     && mv web /opt/transmission-ui/transmissionic
 
+# Build wireguard-go for systems without kernel WireGuard module
+FROM golang:1.25.7-alpine AS wireguard-go-builder
+RUN apk add --no-cache git make
+RUN git clone https://git.zx2c4.com/wireguard-go /build/wireguard-go \
+    && cd /build/wireguard-go \
+    && make \
+    && cp wireguard-go /usr/local/bin/wireguard-go
+
 # Main image
 FROM ubuntu:24.04
 
@@ -25,6 +33,7 @@ VOLUME /data
 VOLUME /config
 
 COPY --from=transmissionui /opt/transmission-ui /opt/transmission-ui
+COPY --from=wireguard-go-builder /usr/local/bin/wireguard-go /usr/local/bin/wireguard-go
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
@@ -32,8 +41,9 @@ RUN apt-get update && apt-get install -y \
     tzdata dnsutils iputils-ping ufw iproute2 \
     openssh-client git jq curl wget unrar unzip bc \
     # New for this image
-    wireguard nginx \
+    wireguard nginx iptables \
     # End new for this image
+    && update-alternatives --set iptables /usr/sbin/iptables-legacy \
     && rm -rf /tmp/* /var/tmp/* /var/lib/apt/lists/* \
     && useradd -u 911 -U -d /config -s /bin/false abc \
     && usermod -G users abc
