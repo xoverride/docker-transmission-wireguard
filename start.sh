@@ -3,6 +3,9 @@
 # Exit on error
 set -e
 
+VETH_IP_1=${VETH_IP_1:-10.10.13.36}
+VETH_IP_2=${VETH_IP_2:-10.10.13.37}
+
 if [[ -n "$REVISION" ]]; then
   echo "Image revision: $REVISION"
 fi
@@ -14,7 +17,7 @@ if ip netns ls | grep -q "physical"
 then
     # Dangling network from previous run, clean up
     echo "Clean up dangling network namespaces"
-    ip -all netns delete
+    ip netns delete physical
 fi
 
 # Grab information from the default interface set up in the container
@@ -60,7 +63,7 @@ ip -n physical route add default via "$GW" dev "$INT"
 # We need to make the wg0 interface separately to do the namespace linking
 # and we can't use wg-quick after that. So the rest is done "manually".
 #
-address=$(grep "Address" "$CONFIG_FILE" | awk '{print $NF}' | cut -d, -f1)
+address=$(grep -i "^[[:space:]]*Address" "$CONFIG_FILE" | head -1 | sed 's/.*=[[:space:]]*//' | tr -d '[:space:]' | cut -d, -f1)
 #dns=$(grep "DNS" "$config_file" | awk '{print $NF}')
 
 ip addr add "$address" dev wg0
@@ -84,21 +87,23 @@ curl --silent -w "\n" ipecho.net/plain
 ip link add veth1 type veth peer name veth2 netns physical
 
 # Set their IPs, CIDR with only two addresses to limit ip route ranges
-ip addr add 10.10.13.36/31 dev veth1
-ip -n physical addr add 10.10.13.37/31 dev veth2
+ip addr add "${VETH_IP_1}/31" dev veth1
+ip -n physical addr add "${VETH_IP_2}/31" dev veth2
 
 # Start the veth interfaces
 ip link set veth1 up
 ip -n physical link set veth2 up
 
-# Start a reverse proxy in the physical namespace
-ip netns exec physical nginx -c /opt/nginx/server.conf
+# Generate runtime nginx config with correct veth IP and start reverse proxy
+NGINX_RUNTIME_CONF=$(mktemp)
+sed "s/10.10.13.36/${VETH_IP_1}/" /opt/nginx/server.conf > "$NGINX_RUNTIME_CONF"
+ip netns exec physical nginx -c "$NGINX_RUNTIME_CONF"
 
 # Make sure TRANSMISSION_HOME exists and create/update settings.json
 mkdir -p "$TRANSMISSION_HOME"
-python3 /opt/transmission/updateSettings.py /opt/transmission/default-settings.json ${TRANSMISSION_HOME}/settings.json || exit 1
+python3 /opt/transmission/updateSettings.py /opt/transmission/default-settings.json "${TRANSMISSION_HOME}/settings.json" || exit 1
 
 # Support running Transmission as non-root (and set permissions on folders)
 . /opt/transmission/userSetup.sh
 
-exec su --preserve-environment ${RUN_AS} -s /bin/bash -c "/usr/bin/transmission-daemon --foreground -g ${TRANSMISSION_HOME}"
+exec su --preserve-environment "${RUN_AS}" -s /bin/bash -c "/usr/bin/transmission-daemon --foreground -g ${TRANSMISSION_HOME}"

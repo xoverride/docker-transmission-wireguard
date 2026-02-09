@@ -66,7 +66,7 @@ for setting in settings_dict:
         env_log_value = "[REDACTED]" if setting_is_sensitive else env_value
 
         # Coerce env var values to the expected type in settings.json
-        if type(settings_dict[setting]) == bool:
+        if isinstance(settings_dict[setting], bool):
             env_value = env_value.lower() == 'true'
         else:
             setting_type = type(settings_dict[setting])
