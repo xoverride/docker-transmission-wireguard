@@ -43,6 +43,9 @@ fi
 echo "DNS config:"
 cat /etc/resolv.conf
 
+# Disable IPv6 in the default namespace to prevent leaks outside the VPN tunnel
+sysctl -w net.ipv6.conf.all.disable_ipv6=1
+
 # Create a "physical" network namespace and move our eth0 there
 ip netns ls
 ip netns add physical
